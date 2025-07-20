@@ -1,10 +1,10 @@
 'use client';
 
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
-import { Upload, FileText, User, Mail, Phone, Briefcase, GraduationCap, Loader2, AlertCircle, CheckCircle, Wifi, WifiOff } from 'lucide-react';
+import { Upload, FileText, User, Mail, Phone, Briefcase, GraduationCap, Loader2, AlertCircle, CheckCircle, Wifi, WifiOff, RefreshCw, Download } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { parseResumeText, parseResumeFile, validateFile, validateResumeContent, checkApiHealth, type ParsedResume, ApiError } from '@/lib/api';
 
@@ -21,6 +21,9 @@ export default function ResumeParser() {
   const [error, setError] = useState<string | null>(null);
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
   const [apiStatus, setApiStatus] = useState<'checking' | 'online' | 'offline'>('checking');
+  const [retryCount, setRetryCount] = useState(0);
+  const [processingTime, setProcessingTime] = useState<number | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const {
     register,
@@ -41,6 +44,9 @@ export default function ResumeParser() {
       try {
         const isHealthy = await checkApiHealth();
         setApiStatus(isHealthy ? 'online' : 'offline');
+        if (isHealthy) {
+          setRetryCount(0); // Reset retry count on successful connection
+        }
       } catch (error) {
         setApiStatus('offline');
       }
@@ -85,11 +91,14 @@ export default function ResumeParser() {
     }
   }, [setValue]);
 
-  // Parse resume function with enhanced error handling
+  // Parse resume function with enhanced error handling and retry logic
   const parseResume = async (data: ResumeFormData) => {
     setIsLoading(true);
     setError(null);
     setParsedData(null);
+    setProcessingTime(null);
+    
+    const startTime = Date.now();
 
     try {
       let parsedData: ParsedResume;
@@ -108,10 +117,17 @@ export default function ResumeParser() {
         parsedData = await parseResumeText(data.content);
       }
 
+      const endTime = Date.now();
+      setProcessingTime(endTime - startTime);
       setParsedData(parsedData);
+      setRetryCount(0); // Reset retry count on success
     } catch (err) {
       if (err instanceof ApiError) {
         setError(err.message);
+        // Increment retry count for network errors
+        if (err.code === 'NETWORK_ERROR') {
+          setRetryCount(prev => prev + 1);
+        }
       } else {
         setError(err instanceof Error ? err.message : 'An unexpected error occurred');
       }
@@ -120,12 +136,26 @@ export default function ResumeParser() {
     }
   };
 
+  // Retry function
+  const handleRetry = useCallback(() => {
+    if (retryCount < 3) {
+      parseResume({ content: watchedContent || '' });
+    } else {
+      setError('Maximum retry attempts reached. Please check your connection and try again.');
+    }
+  }, [retryCount, watchedContent]);
+
   // Reset form
   const handleReset = () => {
     reset();
     setParsedData(null);
     setError(null);
     setUploadedFile(null);
+    setRetryCount(0);
+    setProcessingTime(null);
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
   };
 
   // Handle drag and drop
@@ -161,6 +191,22 @@ export default function ResumeParser() {
       }
     }
   }, [setValue]);
+
+  // Export parsed data as JSON
+  const handleExport = useCallback(() => {
+    if (!parsedData) return;
+    
+    const dataStr = JSON.stringify(parsedData, null, 2);
+    const dataBlob = new Blob([dataStr], { type: 'application/json' });
+    const url = URL.createObjectURL(dataBlob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'parsed-resume.json';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  }, [parsedData]);
 
   return (
     <div className="max-w-4xl mx-auto p-6 space-y-8">
@@ -229,6 +275,7 @@ export default function ResumeParser() {
                   </p>
                 </div>
                 <input
+                  ref={fileInputRef}
                   type="file"
                   className="hidden"
                   accept=".pdf,.doc,.docx,.txt"
@@ -277,7 +324,17 @@ export default function ResumeParser() {
                 className="flex items-center gap-2 p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-md"
               >
                 <AlertCircle className="w-5 h-5 text-red-500 flex-shrink-0" />
-                <span className="text-red-700 dark:text-red-400">{error}</span>
+                <span className="text-red-700 dark:text-red-400 flex-1">{error}</span>
+                {retryCount < 3 && (
+                  <button
+                    type="button"
+                    onClick={handleRetry}
+                    className="flex items-center gap-1 px-2 py-1 text-xs bg-red-100 dark:bg-red-800 text-red-700 dark:text-red-300 rounded hover:bg-red-200 dark:hover:bg-red-700 transition-colors"
+                  >
+                    <RefreshCw className="w-3 h-3" />
+                    Retry
+                  </button>
+                )}
               </motion.div>
             )}
           </AnimatePresence>
@@ -322,7 +379,23 @@ export default function ResumeParser() {
             exit={{ opacity: 0, y: -20 }}
             className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6 space-y-6"
           >
-            <h2 className="text-2xl font-bold text-gray-900 dark:text-white">Parsed Results</h2>
+            <div className="flex items-center justify-between">
+              <h2 className="text-2xl font-bold text-gray-900 dark:text-white">Parsed Results</h2>
+              <div className="flex items-center gap-4">
+                {processingTime && (
+                  <span className="text-sm text-gray-500 dark:text-gray-400">
+                    Processed in {processingTime}ms
+                  </span>
+                )}
+                <button
+                  onClick={handleExport}
+                  className="flex items-center gap-2 px-3 py-2 text-sm bg-green-600 text-white rounded-md hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2 transition-colors"
+                >
+                  <Download className="w-4 h-4" />
+                  Export JSON
+                </button>
+              </div>
+            </div>
             
             {/* Personal Information */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">

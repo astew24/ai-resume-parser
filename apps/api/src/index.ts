@@ -15,6 +15,10 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 const NODE_ENV = process.env.NODE_ENV || 'development';
 
+// Simple in-memory cache for parsed results (in production, use Redis)
+const parsedResultsCache = new Map<string, any>();
+const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
 // Rate limiting
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
@@ -50,8 +54,13 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization'],
 }));
 
+// Custom logging format
+const logFormat = NODE_ENV === 'production' 
+  ? ':remote-addr - :remote-user [:date[clf]] ":method :url HTTP/:http-version" :status :res[content-length] ":referrer" ":user-agent"'
+  : ':method :url :status :response-time ms';
+
 // Logging middleware
-app.use(morgan(NODE_ENV === 'production' ? 'combined' : 'dev'));
+app.use(morgan(logFormat));
 
 // Body parsing middleware
 app.use(express.json({ limit: '10mb' }));
@@ -130,15 +139,39 @@ class ParsingError extends Error {
   }
 }
 
+// Utility function to generate cache key
+function generateCacheKey(content: string): string {
+  const crypto = require('crypto');
+  return crypto.createHash('md5').update(content).digest('hex');
+}
+
+// Utility function to clean cache periodically
+function cleanExpiredCache() {
+  const now = Date.now();
+  for (const [key, value] of parsedResultsCache.entries()) {
+    if (now - value.timestamp > CACHE_TTL) {
+      parsedResultsCache.delete(key);
+    }
+  }
+}
+
+// Clean cache every 10 minutes
+setInterval(cleanExpiredCache, 10 * 60 * 1000);
+
 // Enhanced error handling middleware
 app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
-  console.error(`[${new Date().toISOString()}] Error:`, {
+  const timestamp = new Date().toISOString();
+  const logData = {
+    timestamp,
     message: err.message,
     stack: err.stack,
     url: req.url,
     method: req.method,
     ip: req.ip,
-  });
+    userAgent: req.get('User-Agent'),
+  };
+  
+  console.error(`[${timestamp}] Error:`, logData);
   
   if (err instanceof multer.MulterError) {
     return res.status(400).json({
@@ -188,19 +221,35 @@ app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
 
 // Health check endpoint with enhanced information
 app.get('/health', (req: Request, res: Response) => {
+  const uptime = process.uptime();
+  const memoryUsage = process.memoryUsage();
+  
   res.json({
     success: true,
     message: 'AI Resume Parser API is running',
     timestamp: new Date().toISOString(),
     environment: NODE_ENV,
     version: process.env.npm_package_version || '1.0.0',
-    uptime: process.uptime(),
-    memory: process.memoryUsage(),
+    uptime: {
+      seconds: Math.floor(uptime),
+      minutes: Math.floor(uptime / 60),
+      hours: Math.floor(uptime / 3600),
+    },
+    memory: {
+      rss: `${Math.round(memoryUsage.rss / 1024 / 1024)} MB`,
+      heapUsed: `${Math.round(memoryUsage.heapUsed / 1024 / 1024)} MB`,
+      heapTotal: `${Math.round(memoryUsage.heapTotal / 1024 / 1024)} MB`,
+    },
+    cache: {
+      size: parsedResultsCache.size,
+    },
   });
 });
 
 // Resume parsing endpoint with enhanced functionality
 app.post('/api/parse-resume', upload.single('file'), async (req: Request, res: Response, next: NextFunction) => {
+  const startTime = Date.now();
+  
   try {
     let content = '';
     let format = 'txt';
@@ -221,6 +270,15 @@ app.post('/api/parse-resume', upload.single('file'), async (req: Request, res: R
       throw new ValidationError('No resume content or file provided');
     }
 
+    // Check cache first
+    const cacheKey = generateCacheKey(content);
+    const cachedResult = parsedResultsCache.get(cacheKey);
+    
+    if (cachedResult && (Date.now() - cachedResult.timestamp) < CACHE_TTL) {
+      console.log(`[${new Date().toISOString()}] Cache hit for content hash: ${cacheKey}`);
+      return res.json(cachedResult.data);
+    }
+
     // Validate input using Zod schema
     const validationResult = ResumeParseRequestSchema.safeParse({
       content,
@@ -239,6 +297,15 @@ app.post('/api/parse-resume', upload.single('file'), async (req: Request, res: R
       success: true,
       data: parsedData,
     });
+
+    // Cache the result
+    parsedResultsCache.set(cacheKey, {
+      data: response,
+      timestamp: Date.now(),
+    });
+
+    const processingTime = Date.now() - startTime;
+    console.log(`[${new Date().toISOString()}] Resume parsed successfully in ${processingTime}ms`);
 
     res.json(response);
   } catch (error) {
@@ -281,7 +348,9 @@ async function parseResumeContent(content: string): Promise<z.infer<typeof Resum
       'typescript', 'java', 'c++', 'html', 'css', 'angular', 'vue', 'php', 'ruby',
       'go', 'rust', 'swift', 'kotlin', 'scala', 'r', 'matlab', 'git', 'jenkins',
       'terraform', 'ansible', 'mongodb', 'postgresql', 'mysql', 'redis', 'elasticsearch',
-      'machine learning', 'ai', 'data science', 'statistics', 'agile', 'scrum'
+      'machine learning', 'ai', 'data science', 'statistics', 'agile', 'scrum',
+      'rest api', 'graphql', 'microservices', 'serverless', 'cloud computing',
+      'devops', 'ci/cd', 'kubernetes', 'docker', 'jenkins', 'gitlab', 'github actions'
     ];
     
     const skills = lines
@@ -364,6 +433,7 @@ app.listen(PORT, () => {
   console.log(`📊 Health check: http://localhost:${PORT}/health`);
   console.log(`🌍 Environment: ${NODE_ENV}`);
   console.log(`⏰ Started at: ${new Date().toISOString()}`);
+  console.log(`💾 Cache TTL: ${CACHE_TTL / 1000 / 60} minutes`);
 });
 
 export default app;

@@ -3,7 +3,7 @@ import app from './index';
 
 describe('AI Resume Parser API', () => {
   describe('GET /health', () => {
-    it('should return health status', async () => {
+    it('should return health status with detailed information', async () => {
       const response = await request(app)
         .get('/health')
         .expect(200);
@@ -12,6 +12,23 @@ describe('AI Resume Parser API', () => {
       expect(response.body).toHaveProperty('message', 'AI Resume Parser API is running');
       expect(response.body).toHaveProperty('timestamp');
       expect(response.body).toHaveProperty('environment');
+      expect(response.body).toHaveProperty('uptime');
+      expect(response.body).toHaveProperty('memory');
+      expect(response.body).toHaveProperty('cache');
+      
+      // Check uptime structure
+      expect(response.body.uptime).toHaveProperty('seconds');
+      expect(response.body.uptime).toHaveProperty('minutes');
+      expect(response.body.uptime).toHaveProperty('hours');
+      
+      // Check memory structure
+      expect(response.body.memory).toHaveProperty('rss');
+      expect(response.body.memory).toHaveProperty('heapUsed');
+      expect(response.body.memory).toHaveProperty('heapTotal');
+      
+      // Check cache structure
+      expect(response.body.cache).toHaveProperty('size');
+      expect(typeof response.body.cache.size).toBe('number');
     });
   });
 
@@ -49,6 +66,37 @@ describe('AI Resume Parser API', () => {
       expect(response.body.data).toHaveProperty('skills');
     });
 
+    it('should return cached result for identical content', async () => {
+      const resumeContent = `
+        Jane Smith
+        jane.smith@example.com
+        +1-555-987-6543
+        
+        Skills: Python, Machine Learning, Data Science
+      `;
+
+      // First request
+      const response1 = await request(app)
+        .post('/api/parse-resume')
+        .send({
+          content: resumeContent,
+          format: 'txt'
+        })
+        .expect(200);
+
+      // Second request with same content
+      const response2 = await request(app)
+        .post('/api/parse-resume')
+        .send({
+          content: resumeContent,
+          format: 'txt'
+        })
+        .expect(200);
+
+      // Both responses should be identical
+      expect(response1.body).toEqual(response2.body);
+    });
+
     it('should return error for empty content', async () => {
       const response = await request(app)
         .post('/api/parse-resume')
@@ -77,6 +125,22 @@ describe('AI Resume Parser API', () => {
       expect(response.body).toHaveProperty('code', 'VALIDATION_ERROR');
     });
 
+    it('should return error for content too long', async () => {
+      const longContent = 'A'.repeat(50001);
+      
+      const response = await request(app)
+        .post('/api/parse-resume')
+        .send({
+          content: longContent,
+          format: 'txt'
+        })
+        .expect(400);
+
+      expect(response.body).toHaveProperty('success', false);
+      expect(response.body).toHaveProperty('error');
+      expect(response.body).toHaveProperty('code', 'VALIDATION_ERROR');
+    });
+
     it('should return error for missing content', async () => {
       const response = await request(app)
         .post('/api/parse-resume')
@@ -86,6 +150,84 @@ describe('AI Resume Parser API', () => {
       expect(response.body).toHaveProperty('success', false);
       expect(response.body).toHaveProperty('error');
       expect(response.body).toHaveProperty('code', 'VALIDATION_ERROR');
+    });
+
+    it('should handle file upload correctly', async () => {
+      const response = await request(app)
+        .post('/api/parse-resume')
+        .attach('file', Buffer.from('John Doe\njohn@example.com\nSkills: JavaScript'), 'resume.txt')
+        .expect(200);
+
+      expect(response.body).toHaveProperty('success', true);
+      expect(response.body).toHaveProperty('data');
+    });
+
+    it('should return error for invalid file type', async () => {
+      const response = await request(app)
+        .post('/api/parse-resume')
+        .attach('file', Buffer.from('test'), 'test.exe')
+        .expect(400);
+
+      expect(response.body).toHaveProperty('success', false);
+      expect(response.body).toHaveProperty('error');
+      expect(response.body).toHaveProperty('code', 'INVALID_FILE_TYPE');
+    });
+
+    it('should extract skills correctly', async () => {
+      const resumeContent = `
+        John Doe
+        Skills: JavaScript, React, Node.js, Python, AWS, Docker
+        Experience: Software Engineer
+      `;
+
+      const response = await request(app)
+        .post('/api/parse-resume')
+        .send({
+          content: resumeContent,
+          format: 'txt'
+        })
+        .expect(200);
+
+      expect(response.body.data.skills).toContain('javascript');
+      expect(response.body.data.skills).toContain('react');
+      expect(response.body.data.skills).toContain('node');
+      expect(response.body.data.skills).toContain('python');
+    });
+
+    it('should extract email correctly', async () => {
+      const resumeContent = `
+        John Doe
+        john.doe@example.com
+        Software Engineer
+      `;
+
+      const response = await request(app)
+        .post('/api/parse-resume')
+        .send({
+          content: resumeContent,
+          format: 'txt'
+        })
+        .expect(200);
+
+      expect(response.body.data.email).toBe('john.doe@example.com');
+    });
+
+    it('should extract phone number correctly', async () => {
+      const resumeContent = `
+        John Doe
+        +1-555-123-4567
+        Software Engineer
+      `;
+
+      const response = await request(app)
+        .post('/api/parse-resume')
+        .send({
+          content: resumeContent,
+          format: 'txt'
+        })
+        .expect(200);
+
+      expect(response.body.data.phone).toBe('+1-555-123-4567');
     });
   });
 
@@ -104,6 +246,31 @@ describe('AI Resume Parser API', () => {
         expect(rateLimitedResponse.body).toHaveProperty('success', false);
         expect(rateLimitedResponse.body).toHaveProperty('error');
       }
+    });
+  });
+
+  describe('Error Handling', () => {
+    it('should handle malformed JSON gracefully', async () => {
+      const response = await request(app)
+        .post('/api/parse-resume')
+        .set('Content-Type', 'application/json')
+        .send('invalid json')
+        .expect(400);
+
+      expect(response.body).toHaveProperty('success', false);
+    });
+
+    it('should handle missing required fields', async () => {
+      const response = await request(app)
+        .post('/api/parse-resume')
+        .send({
+          format: 'txt'
+          // Missing content field
+        })
+        .expect(400);
+
+      expect(response.body).toHaveProperty('success', false);
+      expect(response.body).toHaveProperty('code', 'VALIDATION_ERROR');
     });
   });
 }); 

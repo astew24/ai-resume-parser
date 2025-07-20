@@ -37,6 +37,8 @@ export interface ApiError {
 
 // API configuration
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+const REQUEST_TIMEOUT = 30000; // 30 seconds
+const MAX_RETRIES = 2;
 
 /**
  * Custom error class for API errors
@@ -54,100 +56,170 @@ export class ApiError extends Error {
 }
 
 /**
+ * Helper function to create a timeout promise
+ */
+function createTimeoutPromise(ms: number): Promise<never> {
+  return new Promise((_, reject) => {
+    setTimeout(() => reject(new Error('Request timeout')), ms);
+  });
+}
+
+/**
+ * Helper function to make a fetch request with timeout and retry logic
+ */
+async function fetchWithTimeout(url: string, options: RequestInit, timeout: number = REQUEST_TIMEOUT): Promise<Response> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeout);
+  
+  try {
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    return response;
+  } catch (error) {
+    clearTimeout(timeoutId);
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new ApiError('Request timeout - the server took too long to respond', 'TIMEOUT_ERROR');
+    }
+    throw error;
+  }
+}
+
+/**
+ * Helper function to retry a request
+ */
+async function retryRequest<T>(
+  requestFn: () => Promise<T>,
+  maxRetries: number = MAX_RETRIES
+): Promise<T> {
+  let lastError: Error;
+  
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await requestFn();
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error('Unknown error');
+      
+      // Don't retry on certain errors
+      if (error instanceof ApiError && error.code === 'VALIDATION_ERROR') {
+        throw error;
+      }
+      
+      // If this is the last attempt, throw the error
+      if (attempt === maxRetries) {
+        throw lastError;
+      }
+      
+      // Wait before retrying (exponential backoff)
+      const delay = Math.pow(2, attempt) * 1000;
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+  }
+  
+  throw lastError!;
+}
+
+/**
  * Parse resume content by sending text to the API
  */
 export async function parseResumeText(content: string): Promise<ParsedResume> {
-  try {
-    const response = await fetch(`${API_BASE_URL}/api/parse-resume`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        content,
-        format: 'txt',
-      }),
-    });
+  return retryRequest(async () => {
+    try {
+      const response = await fetchWithTimeout(`${API_BASE_URL}/api/parse-resume`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          content,
+          format: 'txt',
+        }),
+      });
 
-    const result: ParseResponse = await response.json();
+      const result: ParseResponse = await response.json();
 
-    if (!response.ok) {
+      if (!response.ok) {
+        throw new ApiError(
+          result.error || 'Failed to parse resume',
+          result.code,
+          response.status
+        );
+      }
+
+      if (!result.success || !result.data) {
+        throw new ApiError(
+          result.error || 'Invalid response from server',
+          result.code
+        );
+      }
+
+      return result.data;
+    } catch (error) {
+      if (error instanceof ApiError) {
+        throw error;
+      }
+      
+      if (error instanceof TypeError && error.message.includes('fetch')) {
+        throw new ApiError('Network error: Unable to connect to the server', 'NETWORK_ERROR');
+      }
+      
       throw new ApiError(
-        result.error || 'Failed to parse resume',
-        result.code,
-        response.status
+        error instanceof Error ? error.message : 'An unexpected error occurred',
+        'UNKNOWN_ERROR'
       );
     }
-
-    if (!result.success || !result.data) {
-      throw new ApiError(
-        result.error || 'Invalid response from server',
-        result.code
-      );
-    }
-
-    return result.data;
-  } catch (error) {
-    if (error instanceof ApiError) {
-      throw error;
-    }
-    
-    if (error instanceof TypeError && error.message.includes('fetch')) {
-      throw new ApiError('Network error: Unable to connect to the server', 'NETWORK_ERROR');
-    }
-    
-    throw new ApiError(
-      error instanceof Error ? error.message : 'An unexpected error occurred',
-      'UNKNOWN_ERROR'
-    );
-  }
+  });
 }
 
 /**
  * Parse resume file by uploading it to the API
  */
 export async function parseResumeFile(file: File): Promise<ParsedResume> {
-  try {
-    const formData = new FormData();
-    formData.append('file', file);
+  return retryRequest(async () => {
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
 
-    const response = await fetch(`${API_BASE_URL}/api/parse-resume`, {
-      method: 'POST',
-      body: formData,
-    });
+      const response = await fetchWithTimeout(`${API_BASE_URL}/api/parse-resume`, {
+        method: 'POST',
+        body: formData,
+      });
 
-    const result: ParseResponse = await response.json();
+      const result: ParseResponse = await response.json();
 
-    if (!response.ok) {
+      if (!response.ok) {
+        throw new ApiError(
+          result.error || 'Failed to parse resume file',
+          result.code,
+          response.status
+        );
+      }
+
+      if (!result.success || !result.data) {
+        throw new ApiError(
+          result.error || 'Invalid response from server',
+          result.code
+        );
+      }
+
+      return result.data;
+    } catch (error) {
+      if (error instanceof ApiError) {
+        throw error;
+      }
+      
+      if (error instanceof TypeError && error.message.includes('fetch')) {
+        throw new ApiError('Network error: Unable to connect to the server', 'NETWORK_ERROR');
+      }
+      
       throw new ApiError(
-        result.error || 'Failed to parse resume file',
-        result.code,
-        response.status
+        error instanceof Error ? error.message : 'An unexpected error occurred',
+        'UNKNOWN_ERROR'
       );
     }
-
-    if (!result.success || !result.data) {
-      throw new ApiError(
-        result.error || 'Invalid response from server',
-        result.code
-      );
-    }
-
-    return result.data;
-  } catch (error) {
-    if (error instanceof ApiError) {
-      throw error;
-    }
-    
-    if (error instanceof TypeError && error.message.includes('fetch')) {
-      throw new ApiError('Network error: Unable to connect to the server', 'NETWORK_ERROR');
-    }
-    
-    throw new ApiError(
-      error instanceof Error ? error.message : 'An unexpected error occurred',
-      'UNKNOWN_ERROR'
-    );
-  }
+  });
 }
 
 /**
@@ -155,12 +227,12 @@ export async function parseResumeFile(file: File): Promise<ParsedResume> {
  */
 export async function checkApiHealth(): Promise<boolean> {
   try {
-    const response = await fetch(`${API_BASE_URL}/health`, {
+    const response = await fetchWithTimeout(`${API_BASE_URL}/health`, {
       method: 'GET',
       headers: {
         'Content-Type': 'application/json',
       },
-    });
+    }, 5000); // Shorter timeout for health checks
 
     if (!response.ok) {
       return false;
@@ -231,4 +303,15 @@ export function validateResumeContent(content: string): { isValid: boolean; erro
   }
 
   return { isValid: true };
+}
+
+/**
+ * Get API configuration info
+ */
+export function getApiConfig() {
+  return {
+    baseUrl: API_BASE_URL,
+    timeout: REQUEST_TIMEOUT,
+    maxRetries: MAX_RETRIES,
+  };
 } 
