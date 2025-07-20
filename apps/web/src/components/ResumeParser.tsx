@@ -1,50 +1,26 @@
 'use client';
 
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
-import { Upload, FileText, User, Mail, Phone, Briefcase, GraduationCap, Loader2, AlertCircle, CheckCircle } from 'lucide-react';
+import { Upload, FileText, User, Mail, Phone, Briefcase, GraduationCap, Loader2, AlertCircle, CheckCircle, Wifi, WifiOff } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { parseResumeText, parseResumeFile, validateFile, validateResumeContent, checkApiHealth, type ParsedResume, ApiError } from '@/lib/api';
 
 // Validation schema for the form
 const resumeFormSchema = z.object({
-  content: z.string().min(10, 'Resume content must be at least 10 characters'),
+  content: z.string().min(10, 'Resume content must be at least 10 characters').max(50000, 'Resume content is too long (max 50,000 characters)'),
 });
 
 type ResumeFormData = z.infer<typeof resumeFormSchema>;
-
-// Types for parsed resume data
-interface ParsedResume {
-  name: string;
-  email: string;
-  phone: string;
-  skills: string[];
-  experience: Array<{
-    company: string;
-    position: string;
-    duration?: string;
-    description?: string;
-  }>;
-  education: Array<{
-    institution: string;
-    degree: string;
-    field?: string;
-    year?: string;
-  }>;
-}
-
-interface ParseResponse {
-  success: boolean;
-  data?: ParsedResume;
-  error?: string;
-}
 
 export default function ResumeParser() {
   const [isLoading, setIsLoading] = useState(false);
   const [parsedData, setParsedData] = useState<ParsedResume | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
+  const [apiStatus, setApiStatus] = useState<'checking' | 'online' | 'offline'>('checking');
 
   const {
     register,
@@ -52,25 +28,40 @@ export default function ResumeParser() {
     setValue,
     formState: { errors },
     reset,
+    watch,
   } = useForm<ResumeFormData>({
     resolver: zodResolver(resumeFormSchema),
   });
 
-  // Handle file upload
+  const watchedContent = watch('content');
+
+  // Check API health on component mount
+  useEffect(() => {
+    const checkHealth = async () => {
+      try {
+        const isHealthy = await checkApiHealth();
+        setApiStatus(isHealthy ? 'online' : 'offline');
+      } catch (error) {
+        setApiStatus('offline');
+      }
+    };
+
+    checkHealth();
+    
+    // Check health every 30 seconds
+    const interval = setInterval(checkHealth, 30000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // Handle file upload with enhanced validation
   const handleFileUpload = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
 
-    // Validate file type
-    const allowedTypes = ['application/pdf', 'text/plain', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'];
-    if (!allowedTypes.includes(file.type)) {
-      setError('Invalid file type. Please upload a PDF, DOC, DOCX, or TXT file.');
-      return;
-    }
-
-    // Validate file size (5MB limit)
-    if (file.size > 5 * 1024 * 1024) {
-      setError('File size too large. Please upload a file smaller than 5MB.');
+    // Validate file using utility function
+    const validation = validateFile(file);
+    if (!validation.isValid) {
+      setError(validation.error || 'Invalid file');
       return;
     }
 
@@ -84,47 +75,46 @@ export default function ResumeParser() {
         const content = e.target?.result as string;
         setValue('content', content);
       };
+      reader.onerror = () => {
+        setError('Failed to read file content');
+      };
       reader.readAsText(file);
     } else {
-      // For other file types, we'll send the file directly to the API
+      // For other file types, clear the text content
       setValue('content', '');
     }
   }, [setValue]);
 
-  // Parse resume function
+  // Parse resume function with enhanced error handling
   const parseResume = async (data: ResumeFormData) => {
     setIsLoading(true);
     setError(null);
     setParsedData(null);
 
     try {
-      const formData = new FormData();
-      
+      let parsedData: ParsedResume;
+
       if (uploadedFile) {
-        formData.append('file', uploadedFile);
+        // Parse file
+        parsedData = await parseResumeFile(uploadedFile);
       } else {
-        formData.append('content', data.content);
-        formData.append('format', 'txt');
+        // Validate content
+        const validation = validateResumeContent(data.content);
+        if (!validation.isValid) {
+          throw new Error(validation.error || 'Invalid content');
+        }
+        
+        // Parse text content
+        parsedData = await parseResumeText(data.content);
       }
 
-      const response = await fetch('http://localhost:3001/api/parse-resume', {
-        method: 'POST',
-        body: formData,
-      });
-
-      const result: ParseResponse = await response.json();
-
-      if (!response.ok) {
-        throw new Error(result.error || 'Failed to parse resume');
-      }
-
-      if (result.success && result.data) {
-        setParsedData(result.data);
-      } else {
-        throw new Error(result.error || 'Failed to parse resume');
-      }
+      setParsedData(parsedData);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'An unexpected error occurred');
+      if (err instanceof ApiError) {
+        setError(err.message);
+      } else {
+        setError(err instanceof Error ? err.message : 'An unexpected error occurred');
+      }
     } finally {
       setIsLoading(false);
     }
@@ -137,6 +127,40 @@ export default function ResumeParser() {
     setError(null);
     setUploadedFile(null);
   };
+
+  // Handle drag and drop
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+  }, []);
+
+  const handleDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    
+    const files = Array.from(e.dataTransfer.files);
+    if (files.length > 0) {
+      const file = files[0];
+      const validation = validateFile(file);
+      if (validation.isValid) {
+        setUploadedFile(file);
+        setError(null);
+        
+        if (file.type === 'text/plain') {
+          const reader = new FileReader();
+          reader.onload = (e) => {
+            const content = e.target?.result as string;
+            setValue('content', content);
+          };
+          reader.readAsText(file);
+        } else {
+          setValue('content', '');
+        }
+      } else {
+        setError(validation.error || 'Invalid file');
+      }
+    }
+  }, [setValue]);
 
   return (
     <div className="max-w-4xl mx-auto p-6 space-y-8">
@@ -152,6 +176,28 @@ export default function ResumeParser() {
         <p className="text-lg text-gray-600 dark:text-gray-300">
           Upload your resume or paste the content to extract key information using AI
         </p>
+        
+        {/* API Status Indicator */}
+        <div className="flex items-center justify-center gap-2">
+          {apiStatus === 'checking' && (
+            <>
+              <Loader2 className="w-4 h-4 animate-spin text-yellow-500" />
+              <span className="text-sm text-yellow-600 dark:text-yellow-400">Checking API status...</span>
+            </>
+          )}
+          {apiStatus === 'online' && (
+            <>
+              <Wifi className="w-4 h-4 text-green-500" />
+              <span className="text-sm text-green-600 dark:text-green-400">API Online</span>
+            </>
+          )}
+          {apiStatus === 'offline' && (
+            <>
+              <WifiOff className="w-4 h-4 text-red-500" />
+              <span className="text-sm text-red-600 dark:text-red-400">API Offline</span>
+            </>
+          )}
+        </div>
       </motion.div>
 
       {/* Upload Section */}
@@ -168,7 +214,11 @@ export default function ResumeParser() {
               Upload Resume File
             </label>
             <div className="flex items-center justify-center w-full">
-              <label className="flex flex-col items-center justify-center w-full h-32 border-2 border-gray-300 border-dashed rounded-lg cursor-pointer bg-gray-50 dark:hover:bg-gray-700 dark:bg-gray-600 hover:bg-gray-100 dark:border-gray-500">
+              <label 
+                className="flex flex-col items-center justify-center w-full h-32 border-2 border-gray-300 border-dashed rounded-lg cursor-pointer bg-gray-50 dark:hover:bg-gray-700 dark:bg-gray-600 hover:bg-gray-100 dark:border-gray-500 transition-colors"
+                onDragOver={handleDragOver}
+                onDrop={handleDrop}
+              >
                 <div className="flex flex-col items-center justify-center pt-5 pb-6">
                   <Upload className="w-8 h-8 mb-4 text-gray-500 dark:text-gray-400" />
                   <p className="mb-2 text-sm text-gray-500 dark:text-gray-400">
@@ -190,7 +240,7 @@ export default function ResumeParser() {
             {uploadedFile && (
               <div className="flex items-center gap-2 text-sm text-green-600 dark:text-green-400">
                 <CheckCircle className="w-4 h-4" />
-                {uploadedFile.name}
+                {uploadedFile.name} ({(uploadedFile.size / 1024 / 1024).toFixed(2)} MB)
               </div>
             )}
           </div>
@@ -203,12 +253,17 @@ export default function ResumeParser() {
             <textarea
               {...register('content')}
               rows={8}
-              className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:bg-gray-700 dark:border-gray-600 dark:text-white"
+              className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:bg-gray-700 dark:border-gray-600 dark:text-white resize-vertical"
               placeholder="Paste your resume content here..."
               disabled={isLoading}
             />
             {errors.content && (
               <p className="text-sm text-red-600 dark:text-red-400">{errors.content.message}</p>
+            )}
+            {watchedContent && (
+              <p className="text-xs text-gray-500 dark:text-gray-400">
+                {watchedContent.length} characters
+              </p>
             )}
           </div>
 
@@ -221,7 +276,7 @@ export default function ResumeParser() {
                 exit={{ opacity: 0, height: 0 }}
                 className="flex items-center gap-2 p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-md"
               >
-                <AlertCircle className="w-5 h-5 text-red-500" />
+                <AlertCircle className="w-5 h-5 text-red-500 flex-shrink-0" />
                 <span className="text-red-700 dark:text-red-400">{error}</span>
               </motion.div>
             )}
@@ -231,7 +286,7 @@ export default function ResumeParser() {
           <div className="flex gap-4">
             <button
               type="submit"
-              disabled={isLoading}
+              disabled={isLoading || apiStatus === 'offline'}
               className="flex items-center gap-2 px-6 py-3 bg-blue-600 text-white rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
             >
               {isLoading ? (
@@ -272,7 +327,7 @@ export default function ResumeParser() {
             {/* Personal Information */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div className="flex items-center gap-3 p-4 bg-gray-50 dark:bg-gray-700 rounded-lg">
-                <User className="w-5 h-5 text-blue-500" />
+                <User className="w-5 h-5 text-blue-500 flex-shrink-0" />
                 <div>
                   <p className="text-sm text-gray-500 dark:text-gray-400">Name</p>
                   <p className="font-medium text-gray-900 dark:text-white">{parsedData.name}</p>
@@ -281,7 +336,7 @@ export default function ResumeParser() {
               
               {parsedData.email && (
                 <div className="flex items-center gap-3 p-4 bg-gray-50 dark:bg-gray-700 rounded-lg">
-                  <Mail className="w-5 h-5 text-green-500" />
+                  <Mail className="w-5 h-5 text-green-500 flex-shrink-0" />
                   <div>
                     <p className="text-sm text-gray-500 dark:text-gray-400">Email</p>
                     <p className="font-medium text-gray-900 dark:text-white">{parsedData.email}</p>
@@ -291,7 +346,7 @@ export default function ResumeParser() {
               
               {parsedData.phone && (
                 <div className="flex items-center gap-3 p-4 bg-gray-50 dark:bg-gray-700 rounded-lg">
-                  <Phone className="w-5 h-5 text-purple-500" />
+                  <Phone className="w-5 h-5 text-purple-500 flex-shrink-0" />
                   <div>
                     <p className="text-sm text-gray-500 dark:text-gray-400">Phone</p>
                     <p className="font-medium text-gray-900 dark:text-white">{parsedData.phone}</p>
