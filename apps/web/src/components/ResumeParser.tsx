@@ -4,8 +4,10 @@ import React, { useState, useCallback } from 'react';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
-import { Upload, FileText, User, Mail, Phone, Briefcase, GraduationCap, Loader2, AlertCircle, CheckCircle } from 'lucide-react';
+import { Upload, FileText, User, Mail, Phone, Briefcase, GraduationCap, AlertCircle, CheckCircle } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { parseResume, parseResumeFile, validateFile, ParsedResume, ApiError } from '@/lib/api';
+import LoadingSpinner from './LoadingSpinner';
 
 // Validation schema for the form
 const resumeFormSchema = z.object({
@@ -14,31 +16,7 @@ const resumeFormSchema = z.object({
 
 type ResumeFormData = z.infer<typeof resumeFormSchema>;
 
-// Types for parsed resume data
-interface ParsedResume {
-  name: string;
-  email: string;
-  phone: string;
-  skills: string[];
-  experience: Array<{
-    company: string;
-    position: string;
-    duration?: string;
-    description?: string;
-  }>;
-  education: Array<{
-    institution: string;
-    degree: string;
-    field?: string;
-    year?: string;
-  }>;
-}
 
-interface ParseResponse {
-  success: boolean;
-  data?: ParsedResume;
-  error?: string;
-}
 
 export default function ResumeParser() {
   const [isLoading, setIsLoading] = useState(false);
@@ -61,16 +39,10 @@ export default function ResumeParser() {
     const file = event.target.files?.[0];
     if (!file) return;
 
-    // Validate file type
-    const allowedTypes = ['application/pdf', 'text/plain', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'];
-    if (!allowedTypes.includes(file.type)) {
-      setError('Invalid file type. Please upload a PDF, DOC, DOCX, or TXT file.');
-      return;
-    }
-
-    // Validate file size (5MB limit)
-    if (file.size > 5 * 1024 * 1024) {
-      setError('File size too large. Please upload a file smaller than 5MB.');
+    // Validate file using utility function
+    const validation = validateFile(file);
+    if (!validation.isValid) {
+      setError(validation.error || 'Invalid file');
       return;
     }
 
@@ -98,24 +70,12 @@ export default function ResumeParser() {
     setParsedData(null);
 
     try {
-      const formData = new FormData();
+      let result;
       
       if (uploadedFile) {
-        formData.append('file', uploadedFile);
+        result = await parseResumeFile(uploadedFile);
       } else {
-        formData.append('content', data.content);
-        formData.append('format', 'txt');
-      }
-
-      const response = await fetch('http://localhost:3001/api/parse-resume', {
-        method: 'POST',
-        body: formData,
-      });
-
-      const result: ParseResponse = await response.json();
-
-      if (!response.ok) {
-        throw new Error(result.error || 'Failed to parse resume');
+        result = await parseResume(data.content, 'txt');
       }
 
       if (result.success && result.data) {
@@ -124,7 +84,11 @@ export default function ResumeParser() {
         throw new Error(result.error || 'Failed to parse resume');
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'An unexpected error occurred');
+      if (err instanceof ApiError) {
+        setError(err.message);
+      } else {
+        setError(err instanceof Error ? err.message : 'An unexpected error occurred');
+      }
     } finally {
       setIsLoading(false);
     }
@@ -236,7 +200,7 @@ export default function ResumeParser() {
             >
               {isLoading ? (
                 <>
-                  <Loader2 className="w-5 h-5 animate-spin" />
+                  <LoadingSpinner size="sm" />
                   Parsing...
                 </>
               ) : (
