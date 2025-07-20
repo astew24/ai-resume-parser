@@ -231,6 +231,21 @@ describe('AI Resume Parser API', () => {
     });
   });
 
+  describe('Cache Statistics', () => {
+    it('should return cache statistics', async () => {
+      const response = await request(app)
+        .get('/cache/stats')
+        .expect(200);
+
+      expect(response.body.success).toBe(true);
+      expect(response.body.data).toHaveProperty('size');
+      expect(response.body.data).toHaveProperty('maxAge');
+      expect(response.body.data).toHaveProperty('memoryUsage');
+      expect(response.body.data).toHaveProperty('cacheKeys');
+      expect(Array.isArray(response.body.data.cacheKeys)).toBe(true);
+    });
+  });
+
   describe('Rate Limiting', () => {
     it('should limit requests per IP', async () => {
       // Make multiple requests to trigger rate limiting

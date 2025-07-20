@@ -35,10 +35,45 @@ export interface ApiError {
   status?: number;
 }
 
-// API configuration
+// Enhanced API utilities with timeout and retry logic
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
 const REQUEST_TIMEOUT = 30000; // 30 seconds
-const MAX_RETRIES = 2;
+const MAX_RETRIES = 3;
+
+// Request timeout utility
+const timeoutPromise = (ms: number) => new Promise((_, reject) => {
+  setTimeout(() => reject(new Error('Request timeout')), ms);
+});
+
+// Exponential backoff retry utility
+const retryWithBackoff = async <T>(
+  fn: () => Promise<T>,
+  maxRetries: number = MAX_RETRIES
+): Promise<T> => {
+  let lastError: Error;
+  
+  for (let i = 0; i <= maxRetries; i++) {
+    try {
+      const result = await Promise.race([
+        fn(),
+        timeoutPromise(REQUEST_TIMEOUT)
+      ]) as T;
+      return result;
+    } catch (error) {
+      lastError = error as Error;
+      
+      if (i === maxRetries) {
+        throw lastError;
+      }
+      
+      // Exponential backoff: wait 2^i * 1000ms
+      const delay = Math.min(1000 * Math.pow(2, i), 10000);
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+  }
+  
+  throw lastError!;
+};
 
 /**
  * Custom error class for API errors
@@ -125,9 +160,9 @@ async function retryRequest<T>(
  * Parse resume content by sending text to the API
  */
 export async function parseResumeText(content: string): Promise<ParsedResume> {
-  return retryRequest(async () => {
+  return retryWithBackoff(async () => {
     try {
-      const response = await fetchWithTimeout(`${API_BASE_URL}/api/parse-resume`, {
+      const response = await fetchWithTimeout(`${API_BASE_URL}/parse`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -177,12 +212,12 @@ export async function parseResumeText(content: string): Promise<ParsedResume> {
  * Parse resume file by uploading it to the API
  */
 export async function parseResumeFile(file: File): Promise<ParsedResume> {
-  return retryRequest(async () => {
+  return retryWithBackoff(async () => {
     try {
       const formData = new FormData();
       formData.append('file', file);
 
-      const response = await fetchWithTimeout(`${API_BASE_URL}/api/parse-resume`, {
+      const response = await fetchWithTimeout(`${API_BASE_URL}/parse-file`, {
         method: 'POST',
         body: formData,
       });

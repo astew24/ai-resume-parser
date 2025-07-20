@@ -34,6 +34,23 @@ const limiter = rateLimit({
 // Apply rate limiting to all requests
 app.use(limiter);
 
+// Request timeout middleware
+const timeout = (ms: number) => (req: Request, res: Response, next: NextFunction) => {
+  const timer = setTimeout(() => {
+    res.status(408).json({
+      success: false,
+      error: 'Request timeout',
+      message: 'The request took too long to process'
+    });
+  }, ms);
+
+  res.on('finish', () => clearTimeout(timer));
+  next();
+};
+
+// Apply timeout to all requests (30 seconds)
+app.use(timeout(30000));
+
 // Security middleware
 app.use(helmet({
   contentSecurityPolicy: {
@@ -221,28 +238,35 @@ app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
 
 // Health check endpoint with enhanced information
 app.get('/health', (req: Request, res: Response) => {
-  const uptime = process.uptime();
-  const memoryUsage = process.memoryUsage();
-  
+  const cacheStats = {
+    size: parsedResultsCache.size,
+    maxAge: CACHE_TTL,
+    memoryUsage: process.memoryUsage(),
+  };
+
   res.json({
     success: true,
-    message: 'AI Resume Parser API is running',
+    status: 'healthy',
     timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
     environment: NODE_ENV,
     version: process.env.npm_package_version || '1.0.0',
-    uptime: {
-      seconds: Math.floor(uptime),
-      minutes: Math.floor(uptime / 60),
-      hours: Math.floor(uptime / 3600),
-    },
-    memory: {
-      rss: `${Math.round(memoryUsage.rss / 1024 / 1024)} MB`,
-      heapUsed: `${Math.round(memoryUsage.heapUsed / 1024 / 1024)} MB`,
-      heapTotal: `${Math.round(memoryUsage.heapTotal / 1024 / 1024)} MB`,
-    },
-    cache: {
-      size: parsedResultsCache.size,
-    },
+    cache: cacheStats,
+  });
+});
+
+// Cache statistics endpoint
+app.get('/cache/stats', (req: Request, res: Response) => {
+  const stats = {
+    size: parsedResultsCache.size,
+    maxAge: CACHE_TTL,
+    memoryUsage: process.memoryUsage(),
+    cacheKeys: Array.from(parsedResultsCache.keys()).slice(0, 10), // Show first 10 keys
+  };
+
+  res.json({
+    success: true,
+    data: stats,
   });
 });
 

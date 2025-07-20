@@ -99,38 +99,26 @@ export default function ResumeParser() {
     setProcessingTime(null);
     
     const startTime = Date.now();
-
+    
     try {
-      let parsedData: ParsedResume;
-
+      let result: ParsedResume;
+      
       if (uploadedFile) {
-        // Parse file
-        parsedData = await parseResumeFile(uploadedFile);
+        result = await parseResumeFile(uploadedFile);
       } else {
-        // Validate content
-        const validation = validateResumeContent(data.content);
-        if (!validation.isValid) {
-          throw new Error(validation.error || 'Invalid content');
-        }
-        
-        // Parse text content
-        parsedData = await parseResumeText(data.content);
+        result = await parseResumeText(data.content);
       }
-
+      
       const endTime = Date.now();
       setProcessingTime(endTime - startTime);
-      setParsedData(parsedData);
-      setRetryCount(0); // Reset retry count on success
+      setParsedData(result);
+      setApiStatus('online');
+      setRetryCount(0);
     } catch (err) {
-      if (err instanceof ApiError) {
-        setError(err.message);
-        // Increment retry count for network errors
-        if (err.code === 'NETWORK_ERROR') {
-          setRetryCount(prev => prev + 1);
-        }
-      } else {
-        setError(err instanceof Error ? err.message : 'An unexpected error occurred');
-      }
+      const apiError = err as ApiError;
+      setError(apiError.message || 'Failed to parse resume');
+      setApiStatus('offline');
+      setRetryCount(prev => prev + 1);
     } finally {
       setIsLoading(false);
     }
@@ -223,25 +211,41 @@ export default function ResumeParser() {
           Upload your resume or paste the content to extract key information using AI
         </p>
         
-        {/* API Status Indicator */}
-        <div className="flex items-center justify-center gap-2">
-          {apiStatus === 'checking' && (
-            <>
-              <Loader2 className="w-4 h-4 animate-spin text-yellow-500" />
-              <span className="text-sm text-yellow-600 dark:text-yellow-400">Checking API status...</span>
-            </>
+        <div className="space-y-6">
+          {/* API Status Indicator */}
+          <div className="flex items-center justify-between p-4 bg-gray-50 rounded-lg">
+            <div className="flex items-center space-x-2">
+              {apiStatus === 'checking' && <Loader2 className="h-4 w-4 animate-spin text-blue-500" />}
+              {apiStatus === 'online' && <Wifi className="h-4 w-4 text-green-500" />}
+              {apiStatus === 'offline' && <WifiOff className="h-4 w-4 text-red-500" />}
+              <span className="text-sm font-medium">
+                API Status: {apiStatus === 'checking' ? 'Checking...' : apiStatus === 'online' ? 'Online' : 'Offline'}
+              </span>
+            </div>
+            {apiStatus === 'offline' && (
+              <button
+                onClick={() => window.location.reload()}
+                className="flex items-center space-x-1 text-sm text-blue-600 hover:text-blue-800"
+              >
+                <RefreshCw className="h-3 w-3" />
+                <span>Retry</span>
+              </button>
+            )}
+          </div>
+
+          {/* Processing Time Display */}
+          {processingTime && (
+            <div className="flex items-center space-x-2 text-sm text-gray-600">
+              <CheckCircle className="h-4 w-4 text-green-500" />
+              <span>Processed in {processingTime}ms</span>
+            </div>
           )}
-          {apiStatus === 'online' && (
-            <>
-              <Wifi className="w-4 h-4 text-green-500" />
-              <span className="text-sm text-green-600 dark:text-green-400">API Online</span>
-            </>
-          )}
-          {apiStatus === 'offline' && (
-            <>
-              <WifiOff className="w-4 h-4 text-red-500" />
-              <span className="text-sm text-red-600 dark:text-red-400">API Offline</span>
-            </>
+
+          {/* Progress Indicator */}
+          {isLoading && (
+            <div className="w-full bg-gray-200 rounded-full h-2">
+              <div className="bg-blue-600 h-2 rounded-full animate-pulse" style={{ width: '100%' }}></div>
+            </div>
           )}
         </div>
       </motion.div>
